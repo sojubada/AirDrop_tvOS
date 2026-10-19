@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- 다른 AirDrop 기기를 탐색/송신 -->
+	<key>com.apple.private.airdrop.discovery</key>
+	<true/>
+
+	<!-- 애플TV가 AirDrop 서버로 보이게(수신 광고) -->
+	<key>com.apple.private.airdrop.settings</key>
+	<true/>
+
+	<!--
+	  아래 항목은 1차 시도에서는 주석 상태로 두십시오.
+	  변수를 줄이기 위해 위의 두 개만으로 먼저 검증하고,
+	  앱이 /var/mobile/Downloads 를 직접 읽어야 할 때에만 해제합니다.
+	  (no-sandbox + platform-application 조합은 자기 컨테이너 접근이
+	   오히려 막히는 부작용이 있어 AppDataContainers 가 함께 필요합니다.)
+
+	<key>com.apple.private.security.no-sandbox</key>
+	<true/>
+	<key>platform-application</key>
+	<true/>
+	<key>com.apple.private.security.storage.AppDataContainers</key>
+	<true/>
+	-->
+</dict>
+</plist>

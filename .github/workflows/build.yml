@@ -1,0 +1,84 @@
+name: Build AirDropTV
+
+# 태그를 푸시하면 릴리스에 .tipa 가 첨부됩니다.
+#   git tag v1.0 && git push origin v1.0
+# Actions 탭에서 Run workflow 로 수동 실행하면 아티팩트로만 남습니다.
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write          # 릴리스에 파일을 첨부하려면 필요합니다
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+      - name: 소스 체크아웃
+        uses: actions/checkout@v4
+
+      - name: 도구 설치 (xcodegen, ldid)
+        run: brew install xcodegen ldid
+
+      - name: Xcode 프로젝트 생성
+        run: xcodegen generate
+
+      - name: 빌드 (서명 없이)
+        run: |
+          xcodebuild \
+            -project AirDropTV.xcodeproj \
+            -scheme AirDropTV \
+            -sdk appletvos \
+            -destination 'generic/platform=tvOS' \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: 권한 주입 + .tipa 포장
+        run: |
+          set -euo pipefail
+          APP="build/Build/Products/Release-appletvos/AirDropTV.app"
+          test -d "$APP" || { echo "빌드 산출물을 찾지 못했습니다"; exit 1; }
+
+          BIN_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")"
+          BIN="$APP/$BIN_NAME"
+
+          echo "::group::ldid 가짜 서명 + 권한 주입"
+          ldid -Sentitlements.plist "$BIN"
+          echo "::endgroup::"
+
+          echo "::group::주입된 권한 확인 (airdrop 키 2개가 보여야 합니다)"
+          ldid -e "$BIN"
+          echo "::endgroup::"
+
+          # 권한이 실제로 들어갔는지 자동 검증 — 없으면 여기서 실패시킵니다
+          ldid -e "$BIN" | grep -q 'com.apple.private.airdrop.discovery' \
+            || { echo "✗ airdrop.discovery 권한이 주입되지 않았습니다"; exit 1; }
+          ldid -e "$BIN" | grep -q 'com.apple.private.airdrop.settings' \
+            || { echo "✗ airdrop.settings 권한이 주입되지 않았습니다"; exit 1; }
+          echo "✓ 권한 2개 확인 완료"
+
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry AirDropTV.tipa Payload
+          rm -rf Payload
+          ls -lh AirDropTV.tipa
+
+      - name: 아티팩트 업로드
+        uses: actions/upload-artifact@v4
+        with:
+          name: AirDropTV-tipa
+          path: AirDropTV.tipa
+
+      - name: 릴리스에 첨부 (태그 푸시일 때만)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: AirDropTV.tipa
+          generate_release_notes: true

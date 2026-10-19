@@ -1,0 +1,38 @@
+# XcodeGen 스펙 — .xcodeproj 를 CI에서 생성하므로 맥에 Xcode가 없어도 됩니다.
+name: AirDropTV
+
+options:
+  bundleIdPrefix: com.sojubada
+  deploymentTarget:
+    tvOS: "16.0"
+  createIntermediateGroups: true
+
+targets:
+  AirDropTV:
+    type: application
+    platform: tvOS
+    sources:
+      - path: main.m
+      - path: AppDelegate.h
+      - path: AppDelegate.m
+      - path: ViewController.h
+      - path: ViewController.m
+    info:
+      path: Info.plist
+      properties:
+        CFBundleName: AirDropTV
+        CFBundleDisplayName: AirDropTV
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        LSRequiresIPhoneOS: true
+        UIRequiredDeviceCapabilities:
+          - arm64
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.sojubada.airdroptv
+        TARGETED_DEVICE_FAMILY: "3"
+        CLANG_ENABLE_OBJC_ARC: "YES"
+        ENABLE_BITCODE: "NO"
+        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGN_IDENTITY: ""
