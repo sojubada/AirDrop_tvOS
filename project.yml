@@ -6,6 +6,10 @@ options:
   deploymentTarget:
     tvOS: "16.0"
   createIntermediateGroups: true
+  # 러너의 Xcode가 열 수 있는 프로젝트 포맷으로 고정합니다.
+  # 생략하면 XcodeGen 최신본이 Xcode 16.3 포맷(objectVersion 77)으로 만들어
+  # macos-14 러너의 Xcode 15가 "future Xcode project file format" 오류를 냅니다.
+  projectFormat: xcode15_0
 
 targets:
   AirDropTV:
