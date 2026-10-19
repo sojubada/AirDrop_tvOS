@@ -76,9 +76,13 @@ jobs:
           name: AirDropTV-tipa
           path: AirDropTV.tipa
 
-      - name: 릴리스에 첨부 (태그 푸시일 때만)
-        if: startsWith(github.ref, 'refs/tags/')
+      # 태그를 밀지 않아도 릴리스를 만듭니다. Actions 탭의 Run workflow 로
+      # 실행하면 build-<번호> 라는 이름의 릴리스가 생기고, 그 자산 URL을
+      # TrollStore 에 바로 넣을 수 있습니다.
+      - name: 릴리스 발행
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('build-{0}', github.run_number) }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('build-{0}', github.run_number) }}
           files: AirDropTV.tipa
           generate_release_notes: true

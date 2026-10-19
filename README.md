@@ -22,11 +22,11 @@ Actions가 끝나면 Releases 페이지에 `AirDropTV.tipa`가 첨부됩니다.
 https://github.com/sojubada/AirDrop_tvOS/releases/download/v1.0/AirDropTV.tipa
 ```
 
-### 수동 실행
+### 수동 실행 (터미널 없이)
 
 Actions 탭 → Build AirDropTV → Run workflow.
-이 경우 결과는 Artifacts로만 남고, 아티팩트 다운로드는 로그인이 필요해
-애플TV에서 직접 받을 수 없습니다. 반드시 태그 방식을 쓰십시오.
+`build-<번호>` 이름의 릴리스가 생기고 `.tipa`가 첨부됩니다.
+태그를 밀 필요가 없으므로 브라우저만으로 처리됩니다.
 
 ## 설치
 
