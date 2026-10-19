@@ -50,6 +50,12 @@ Actions 탭 → Build AirDropTV → Run workflow.
 4번 수행 후, 같은 Apple ID의 아이폰에서 파일을 전송하고
 Spartan으로 `/var/mobile/Downloads/com.apple.AirDrop/` 을 확인하십시오.
 
+## Argo(파일 브라우저) 통합
+
+검증이 끝난 뒤 이 기능을 `sojubada/argo`에 통합하기 위한 작업 지시서가
+[`docs/ARGO-INTEGRATION-GUIDE.md`](docs/ARGO-INTEGRATION-GUIDE.md) 에 있습니다.
+코드 작성을 외부(제미나이)에 맡길 때 그 문서를 그대로 전달하면 됩니다.
+
 ## 권한
 
 `entitlements.plist`의 두 키가 핵심입니다.
