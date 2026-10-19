@@ -74,7 +74,7 @@ typedef NS_ENUM(long long, SDAirDropDiscoverableMode) {
     self.logView.backgroundColor = [UIColor colorWithWhite:0.1 alpha:1.0];
     self.logView.textColor = [UIColor greenColor];
     self.logView.font = [UIFont fontWithName:@"Menlo" size:24];
-    self.logView.editable = NO;
+    // tvOS 의 UITextView 에는 editable 속성이 없습니다 (항상 읽기 전용).
     self.logView.userInteractionEnabled = NO;
     self.logView.translatesAutoresizingMaskIntoConstraints = NO;
 
