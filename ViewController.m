@@ -1,12 +1,22 @@
 //
 //  ViewController.m
-//  AirDropTV — tvOS AirDrop 활성화 검증용 최소 앱
+//  AirDropTV — tvOS AirDrop 활성화 검증용 앱 (v2)
 //
-//  tvOS에서는 콘솔을 보기 어려우므로 모든 결과를 화면에 출력합니다.
+//  v1 결과(tvOS 16.6): 프레임워크 로드 ✓, 클래스 3종 ✓,
+//                      모드 설정 즉시 재확인 시 0 유지, Documents 쓰기 불가
+//  v2 변경: 런타임 권한 확인 추가, 모드 설정을 지연 재확인 및 뷰 계층
+//           부착 방식으로 재시도, 송신 테스트를 쓰기 없이 수행
 //
 
 #import "ViewController.h"
 #import <objc/runtime.h>
+#import <dlfcn.h>
+
+// 런타임에 자기 자신의 권한을 읽습니다. Security.framework 의 비공개 심벌이라
+// 링크하지 않고 dlsym 으로 찾습니다. 없으면 그 단계만 건너뜁니다.
+// SecTaskRef 는 공개 헤더에 없으므로 CFTypeRef 로 다룹니다.
+typedef CFTypeRef (*CreateTaskFromSelfFn)(CFAllocatorRef);
+typedef CFTypeRef (*CopyEntitlementFn)(CFTypeRef, CFStringRef, CFErrorRef *);
 
 #pragma mark - 비공개 클래스 선언 (Sharing / SharingUI.framework)
 
@@ -37,6 +47,7 @@ typedef NS_ENUM(long long, SDAirDropDiscoverableMode) {
 @interface ViewController ()
 @property (nonatomic, strong) UITextView *logView;
 @property (nonatomic, strong) SFAirDropDiscoveryController *discovery;
+@property (nonatomic, assign) BOOL discoveryAttached;   // 뷰 계층에 붙였는지
 @end
 
 @implementation ViewController
@@ -49,16 +60,19 @@ typedef NS_ENUM(long long, SDAirDropDiscoverableMode) {
 
     NSArray *titles = @[ @"1. 프레임워크 로드",
                          @"2. 클래스 존재 확인",
-                         @"3. AirDrop 켜기 (Everyone)",
-                         @"4. 수신 대기 화면",
-                         @"5. 보내기 테스트",
+                         @"3. 권한 확인 (런타임)",
+                         @"4. AirDrop 켜기",
+                         @"5. 모드 다시 읽기",
+                         @"6. 수신 대기 화면",
+                         @"7. 보내기 테스트",
                          @"0. AirDrop 끄기" ];
-    NSArray *sels = @[ @"doLoadFrameworks", @"doProbeClasses", @"doEnableAirDrop",
-                       @"doStartReceiving", @"doSendTest", @"doDisableAirDrop" ];
+    NSArray *sels = @[ @"doLoadFrameworks", @"doProbeClasses", @"doCheckEntitlements",
+                       @"doEnableAirDrop", @"doReadMode", @"doStartReceiving",
+                       @"doSendTest", @"doDisableAirDrop" ];
 
     UIStackView *buttons = [[UIStackView alloc] init];
     buttons.axis = UILayoutConstraintAxisVertical;
-    buttons.spacing = 12;
+    buttons.spacing = 8;
     buttons.translatesAutoresizingMaskIntoConstraints = NO;
 
     for (NSUInteger i = 0; i < titles.count; i++) {
@@ -73,7 +87,7 @@ typedef NS_ENUM(long long, SDAirDropDiscoverableMode) {
     self.logView = [[UITextView alloc] init];
     self.logView.backgroundColor = [UIColor colorWithWhite:0.1 alpha:1.0];
     self.logView.textColor = [UIColor greenColor];
-    self.logView.font = [UIFont fontWithName:@"Menlo" size:24];
+    self.logView.font = [UIFont fontWithName:@"Menlo" size:22];
     // tvOS 의 UITextView 에는 editable 속성이 없습니다 (항상 읽기 전용).
     self.logView.userInteractionEnabled = NO;
     self.logView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -84,16 +98,16 @@ typedef NS_ENUM(long long, SDAirDropDiscoverableMode) {
     UILayoutGuide *g = self.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
         [buttons.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:40],
-        [buttons.topAnchor constraintEqualToAnchor:g.topAnchor constant:40],
-        [buttons.widthAnchor constraintEqualToConstant:560],
+        [buttons.topAnchor constraintEqualToAnchor:g.topAnchor constant:30],
+        [buttons.widthAnchor constraintEqualToConstant:480],
 
-        [self.logView.leadingAnchor constraintEqualToAnchor:buttons.trailingAnchor constant:40],
+        [self.logView.leadingAnchor constraintEqualToAnchor:buttons.trailingAnchor constant:30],
         [self.logView.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-40],
-        [self.logView.topAnchor constraintEqualToAnchor:g.topAnchor constant:40],
-        [self.logView.bottomAnchor constraintEqualToAnchor:g.bottomAnchor constant:-40],
+        [self.logView.topAnchor constraintEqualToAnchor:g.topAnchor constant:30],
+        [self.logView.bottomAnchor constraintEqualToAnchor:g.bottomAnchor constant:-30],
     ]];
 
-    [self log:@"준비됨. 1번부터 순서대로 실행하십시오."];
+    [self log:@"v2. 1번부터 순서대로 실행하십시오."];
 }
 
 - (void)log:(NSString *)fmt, ... {
@@ -104,9 +118,20 @@ typedef NS_ENUM(long long, SDAirDropDiscoverableMode) {
     NSLog(@"[AirDropTV] %@", s);
     dispatch_async(dispatch_get_main_queue(), ^{
         self.logView.text = [self.logView.text stringByAppendingFormat:@"\n%@", s];
-        NSRange end = NSMakeRange(self.logView.text.length - 1, 1);
-        [self.logView scrollRangeToVisible:end];
+        if (self.logView.text.length > 0) {
+            NSRange end = NSMakeRange(self.logView.text.length - 1, 1);
+            [self.logView scrollRangeToVisible:end];
+        }
     });
+}
+
+- (NSString *)modeName:(long long)m {
+    switch (m) {
+        case 0: return @"Off";
+        case 1: return @"ContactsOnly";
+        case 2: return @"Everyone";
+        default: return @"알 수 없음";
+    }
 }
 
 #pragma mark - 1. 프레임워크 로드
@@ -116,95 +141,155 @@ typedef NS_ENUM(long long, SDAirDropDiscoverableMode) {
     for (NSString *name in @[ @"Sharing", @"SharingUI" ]) {
         NSString *path = [NSString stringWithFormat:
                           @"/System/Library/PrivateFrameworks/%@.framework", name];
-        BOOL exists = [[NSFileManager defaultManager] fileExistsAtPath:path];
-        if (!exists) {
+        if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
             [self log:@"✗ %@.framework 경로 없음", name];
             continue;
         }
-        NSBundle *b = [NSBundle bundleWithPath:path];
-        BOOL loaded = [b load];
+        BOOL loaded = [[NSBundle bundleWithPath:path] load];
         [self log:@"%@ %@.framework %@", loaded ? @"✓" : @"✗", name,
                   loaded ? @"로드 성공" : @"로드 실패"];
     }
 }
 
-#pragma mark - 2. 클래스 존재 확인 (tvOS 16.6 생존 여부 판정)
+#pragma mark - 2. 클래스 존재 확인
 
 - (void)doProbeClasses {
     [self log:@"\n--- 2. 클래스 존재 확인 ---"];
-    NSArray *names = @[ @"SFAirDropDiscoveryController",
-                        @"SFAirDropReceiverViewController",
-                        @"SFAirDropSharingViewControllerTV" ];
-    BOOL allFound = YES;
-    for (NSString *n in names) {
-        Class c = NSClassFromString(n);
-        if (c) {
-            [self log:@"✓ %@", n];
+    for (NSString *n in @[ @"SFAirDropDiscoveryController",
+                           @"SFAirDropReceiverViewController",
+                           @"SFAirDropSharingViewControllerTV" ]) {
+        [self log:@"%@ %@", NSClassFromString(n) ? @"✓" : @"✗", n];
+    }
+}
+
+#pragma mark - 3. 런타임 권한 확인 (핵심 진단)
+
+// 설치된 바이너리에 권한이 실제로 살아있는지 확인합니다.
+// 여기서 ✗ 가 나오면 TrollStore 설치 과정에서 권한이 보존되지 않은 것이고,
+// ✓ 인데도 모드가 안 바뀌면 권한 문제가 아니라 API 동작 문제입니다.
+- (void)doCheckEntitlements {
+    [self log:@"\n--- 3. 권한 확인 (런타임) ---"];
+    CreateTaskFromSelfFn createTask =
+        (CreateTaskFromSelfFn)dlsym(RTLD_DEFAULT, "SecTaskCreateFromSelf");
+    CopyEntitlementFn copyEnt =
+        (CopyEntitlementFn)dlsym(RTLD_DEFAULT, "SecTaskCopyValueForEntitlement");
+    if (!createTask || !copyEnt) {
+        [self log:@"✗ SecTask 심벌을 찾지 못함 — 권한 확인 건너뜀"];
+        [self log:@"   (이 단계만 실패한 것이며 4번은 그대로 진행하십시오)"];
+    } else {
+
+    CFTypeRef task = createTask(NULL);
+    if (!task) {
+        [self log:@"✗ SecTaskCreateFromSelf 실패"];
+    } else {
+    NSArray *keys = @[ @"com.apple.private.airdrop.discovery",
+                       @"com.apple.private.airdrop.settings",
+                       @"com.apple.private.security.no-sandbox",
+                       @"platform-application",
+                       @"application-identifier" ];
+    for (NSString *k in keys) {
+        CFErrorRef err = NULL;
+        CFTypeRef v = copyEnt(task, (__bridge CFStringRef)k, &err);
+        if (v) {
+            [self log:@"✓ %@ = %@", k, (__bridge id)v];
+            CFRelease(v);
         } else {
-            [self log:@"✗ %@ — 없음", n];
-            allFound = NO;
+            [self log:@"✗ %@ (없음)", k];
         }
+        if (err) CFRelease(err);
     }
-    if (!allFound) {
-        [self log:@"→ 클래스명이 바뀌었을 수 있습니다. 아래 후보를 검색합니다."];
-        [self dumpAirDropClasses];
+    CFRelease(task);
     }
+    }
+
+    [self log:@"샌드박스 쓰기 가능 여부:"];
+    [self probeWritable:NSTemporaryDirectory() label:@"tmp"];
+    [self probeWritable:NSSearchPathForDirectoriesInDomains(
+        NSCachesDirectory, NSUserDomainMask, YES).firstObject label:@"Caches"];
+    [self probeWritable:NSSearchPathForDirectoriesInDomains(
+        NSDocumentDirectory, NSUserDomainMask, YES).firstObject label:@"Documents"];
 }
 
-// 런타임 전체에서 AirDrop 관련 클래스명을 긁어옵니다 (클래스명 변경 시 추적용)
-- (void)dumpAirDropClasses {
-    unsigned int count = 0;
-    Class *all = objc_copyClassList(&count);
-    int hits = 0;
-    for (unsigned int i = 0; i < count && hits < 40; i++) {
-        const char *cn = class_getName(all[i]);
-        NSString *n = [NSString stringWithUTF8String:cn];
-        if ([n containsString:@"AirDrop"]) {
-            [self log:@"   · %@", n];
-            hits++;
-        }
-    }
-    free(all);
-    if (hits == 0) [self log:@"   (AirDrop 관련 클래스를 찾지 못함)"];
+- (void)probeWritable:(NSString *)dir label:(NSString *)label {
+    if (!dir) { [self log:@"   ✗ %@ 경로 없음", label]; return; }
+    NSString *f = [dir stringByAppendingPathComponent:@"_probe.txt"];
+    NSError *e = nil;
+    BOOL ok = [@"x" writeToFile:f atomically:YES encoding:NSUTF8StringEncoding error:&e];
+    if (ok) [[NSFileManager defaultManager] removeItemAtPath:f error:nil];
+    [self log:@"   %@ %@ — %@", ok ? @"✓" : @"✗", label,
+              ok ? @"쓰기 가능" : e.localizedDescription];
 }
 
-#pragma mark - 3. AirDrop 켜기
+#pragma mark - 4. AirDrop 켜기
 
+// v1 은 설정 직후 즉시 읽어 0 이면 실패로 판정했습니다. 설정이 sharingd 로
+// 비동기 전달될 수 있으므로, 지연 재확인과 뷰 계층 부착 재시도를 함께 합니다.
 - (void)doEnableAirDrop {
-    [self log:@"\n--- 3. AirDrop 켜기 ---"];
+    [self log:@"\n--- 4. AirDrop 켜기 ---"];
     Class cls = NSClassFromString(@"SFAirDropDiscoveryController");
-    if (!cls) { [self log:@"✗ DiscoveryController 없음. 1·2번 먼저 실행."]; return; }
+    if (!cls) { [self log:@"✗ DiscoveryController 없음. 1·2번 먼저."]; return; }
 
-    if (!self.discovery) self.discovery = [[cls alloc] init];
+    if (!self.discovery) {
+        self.discovery = [[cls alloc] init];
+        [self log:@"컨트롤러 생성: %@", self.discovery];
+    }
 
+    // 1차 시도 — 그대로 설정
+    [self trySetEveryone:@"1차(그대로)"];
+
+    // 2차 시도 — 뷰 계층에 붙인 뒤 설정.
+    // SFAirDropDiscoveryController 는 UIViewController 라서 view 가 로드되고
+    // 계층에 있어야 내부 동작이 시작될 수 있습니다.
+    if (!self.discoveryAttached) {
+        self.discoveryAttached = YES;
+        [self addChildViewController:self.discovery];
+        self.discovery.view.frame = CGRectMake(-2000, -2000, 200, 200);
+        self.discovery.view.alpha = 0.0;
+        [self.view addSubview:self.discovery.view];
+        [self.discovery didMoveToParentViewController:self];
+        [self log:@"컨트롤러를 뷰 계층에 부착함 (화면 밖)"];
+    }
+    [self trySetEveryone:@"2차(부착 후)"];
+
+    // 지연 재확인 — 비동기 반영 가능성
+    for (double delay in @[ @1.0, @3.0 ]) {
+        double d = [delay doubleValue];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(d * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            long long m = [self.discovery discoverableMode];
+            [self log:@"   %.0f초 후 모드 = %lld (%@)%@", d, m, [self modeName:m],
+                      m == 2 ? @"  ← 반영됨" : @""];
+        });
+    }
+    [self log:@"(1초·3초 후 재확인 결과가 아래에 추가됩니다)"];
+}
+
+- (void)trySetEveryone:(NSString *)label {
     @try {
         [self.discovery setDiscoverableMode:SDAirDropDiscoverableModeEveryone];
     } @catch (NSException *e) {
-        [self log:@"✗ setDiscoverableMode 예외: %@", e.reason];
+        [self log:@"✗ %@ 예외: %@", label, e.reason];
         return;
     }
-
-    long long mode = [self.discovery discoverableMode];
-    [self log:@"현재 모드 = %lld (%@)", mode,
-              mode == 2 ? @"Everyone" : (mode == 1 ? @"ContactsOnly" : @"Off")];
-    if (mode == SDAirDropDiscoverableModeEveryone) {
-        [self log:@"✓ 성공. 아이폰 공유 시트에 이 애플TV가 뜨는지 확인하십시오."];
-    } else {
-        [self log:@"✗ 값이 유지되지 않음 → airdrop.settings 권한 미적용 가능성."];
-    }
+    long long m = [self.discovery discoverableMode];
+    [self log:@"%@ 즉시 읽기 = %lld (%@)", label, m, [self modeName:m]];
 }
 
-- (void)doDisableAirDrop {
-    [self log:@"\n--- 0. AirDrop 끄기 ---"];
-    if (!self.discovery) { [self log:@"컨트롤러 없음."]; return; }
-    [self.discovery setDiscoverableMode:SDAirDropDiscoverableModeOff];
-    [self log:@"모드 = %lld", [self.discovery discoverableMode]];
+#pragma mark - 5. 모드 다시 읽기
+
+- (void)doReadMode {
+    [self log:@"\n--- 5. 모드 다시 읽기 ---"];
+    if (!self.discovery) { [self log:@"컨트롤러 없음. 4번 먼저."]; return; }
+    long long m = [self.discovery discoverableMode];
+    [self log:@"모드 = %lld (%@)", m, [self modeName:m]];
+    [self log:@"※ 아이폰 공유 시트를 열어 이 애플TV가 보이는지 직접 확인하십시오."];
+    [self log:@"   모드 값과 무관하게 보일 수 있습니다."];
 }
 
-#pragma mark - 4. 수신 대기
+#pragma mark - 6. 수신 대기
 
 - (void)doStartReceiving {
-    [self log:@"\n--- 4. 수신 대기 ---"];
+    [self log:@"\n--- 6. 수신 대기 ---"];
     Class cls = NSClassFromString(@"SFAirDropReceiverViewController");
     if (!cls) { [self log:@"✗ ReceiverViewController 없음."]; return; }
 
@@ -212,31 +297,29 @@ typedef NS_ENUM(long long, SDAirDropDiscoverableMode) {
     [self presentViewController:rec animated:YES completion:^{
         if ([rec respondsToSelector:@selector(startAdvertising)]) {
             [(SFAirDropReceiverViewController *)rec startAdvertising];
-            [self log:@"✓ startAdvertising 호출됨. 이 화면을 유지한 채 전송하십시오."];
+            [self log:@"✓ startAdvertising 호출됨"];
+            if (self.discovery) {
+                [self log:@"   이때 모드 = %lld", [self.discovery discoverableMode]];
+            }
         } else {
-            [self log:@"✗ startAdvertising 셀렉터 없음."];
+            [self log:@"✗ startAdvertising 셀렉터 없음"];
         }
     }];
-    [self log:@"수신 화면 표시. 전송 후 Spartan에서 아래 경로를 확인:"];
+    [self log:@"이 화면을 유지한 채 같은 Apple ID 아이폰에서 전송하십시오."];
+    [self log:@"전송 후 Spartan 에서 확인:"];
     [self log:@"/var/mobile/Downloads/com.apple.AirDrop/"];
 }
 
-#pragma mark - 5. 보내기 테스트
+#pragma mark - 7. 보내기 테스트 (쓰기 권한에 의존하지 않음)
 
 - (void)doSendTest {
-    [self log:@"\n--- 5. 보내기 테스트 ---"];
+    [self log:@"\n--- 7. 보내기 테스트 ---"];
     Class cls = NSClassFromString(@"SFAirDropSharingViewControllerTV");
     if (!cls) { [self log:@"✗ SharingViewControllerTV 없음."]; return; }
 
-    NSString *docs = NSSearchPathForDirectoriesInDomains(
-        NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
-    NSString *file = [docs stringByAppendingPathComponent:@"airdrop-test.txt"];
-    NSString *body = [NSString stringWithFormat:
-        @"AirDropTV 송신 테스트\n생성 시각: %@\n", [NSDate date]];
-    NSError *err = nil;
-    [body writeToFile:file atomically:YES encoding:NSUTF8StringEncoding error:&err];
-    if (err) { [self log:@"✗ 테스트 파일 생성 실패: %@", err.localizedDescription]; return; }
-    [self log:@"테스트 파일: %@", file];
+    NSString *file = [self makeOrFindSendableFile];
+    if (!file) { [self log:@"✗ 보낼 파일을 확보하지 못했습니다."]; return; }
+    [self log:@"보낼 파일: %@", file];
 
     NSURL *url = [NSURL fileURLWithPath:file];
     UIViewController *sharing = [[cls alloc] initWithSharingItems:@[ url ]];
@@ -247,6 +330,42 @@ typedef NS_ENUM(long long, SDAirDropDiscoverableMode) {
         }];
     }
     [self presentViewController:sharing animated:YES completion:nil];
+}
+
+// 쓰기 가능한 곳을 차례로 시도하고, 모두 실패하면 앱 번들의 Info.plist 를
+// 보냅니다. 번들 읽기는 샌드박스와 무관하게 항상 가능합니다.
+- (NSString *)makeOrFindSendableFile {
+    NSString *body = [NSString stringWithFormat:@"AirDropTV 송신 테스트\n%@\n", [NSDate date]];
+    NSArray *dirs = @[ NSTemporaryDirectory() ?: @"",
+                       NSSearchPathForDirectoriesInDomains(NSCachesDirectory,
+                           NSUserDomainMask, YES).firstObject ?: @"",
+                       NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                           NSUserDomainMask, YES).firstObject ?: @"" ];
+    for (NSString *d in dirs) {
+        if (d.length == 0) continue;
+        NSString *f = [d stringByAppendingPathComponent:@"airdrop-test.txt"];
+        NSError *e = nil;
+        if ([body writeToFile:f atomically:YES encoding:NSUTF8StringEncoding error:&e]) {
+            return f;
+        }
+        [self log:@"   쓰기 실패(%@): %@", d.lastPathComponent, e.localizedDescription];
+    }
+    NSString *plist = [[[NSBundle mainBundle] bundlePath]
+                       stringByAppendingPathComponent:@"Info.plist"];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:plist]) {
+        [self log:@"   → 쓰기 불가. 앱 번들의 Info.plist 로 대체합니다."];
+        return plist;
+    }
+    return nil;
+}
+
+#pragma mark - 0. 끄기
+
+- (void)doDisableAirDrop {
+    [self log:@"\n--- 0. AirDrop 끄기 ---"];
+    if (!self.discovery) { [self log:@"컨트롤러 없음."]; return; }
+    [self.discovery setDiscoverableMode:SDAirDropDiscoverableModeOff];
+    [self log:@"모드 = %lld", [self.discovery discoverableMode]];
 }
 
 @end
