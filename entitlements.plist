@@ -11,18 +11,24 @@
 	<true/>
 
 	<!--
-	  아래 항목은 1차 시도에서는 주석 상태로 두십시오.
-	  변수를 줄이기 위해 위의 두 개만으로 먼저 검증하고,
-	  앱이 /var/mobile/Downloads 를 직접 읽어야 할 때에만 해제합니다.
-	  (no-sandbox + platform-application 조합은 자기 컨테이너 접근이
-	   오히려 막히는 부작용이 있어 AppDataContainers 가 함께 필요합니다.)
+	  v3 추가분.
 
+	  v2 실행 결과, 위의 두 권한은 런타임에 분명히 적용돼 있었는데도
+	  setDiscoverableMode: 가 반영되지 않았습니다. 즉 권한 자체는 있으나
+	  sharingd 가 요청을 받아들이지 않는 상태로 보입니다.
+
+	  Breezy 는 이 호출을 '앱'이 아니라 루트 권한의 상주 데몬에서 했습니다.
+	  샌드박스 안의 일반 앱이라는 점이 거절 사유일 가능성이 있어,
+	  TrollStore 가 허용하는 범위에서 그 조건에 가깝게 맞춰 봅니다.
+
+	  platform-application 은 샌드박스의 일부를 오히려 조이는 부작용이
+	  있어, 자기 데이터 컨테이너 접근용 권한을 함께 넣습니다.
+	-->
 	<key>com.apple.private.security.no-sandbox</key>
 	<true/>
 	<key>platform-application</key>
 	<true/>
 	<key>com.apple.private.security.storage.AppDataContainers</key>
 	<true/>
-	-->
 </dict>
 </plist>

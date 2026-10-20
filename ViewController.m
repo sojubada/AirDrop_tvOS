@@ -1,6 +1,6 @@
 //
 //  ViewController.m
-//  AirDropTV — tvOS AirDrop 활성화 검증용 앱 (v2)
+//  AirDropTV — tvOS AirDrop 활성화 검증용 앱 (v3)
 //
 //  v1 결과(tvOS 16.6): 프레임워크 로드 ✓, 클래스 3종 ✓,
 //                      모드 설정 즉시 재확인 시 0 유지, Documents 쓰기 불가
@@ -11,6 +11,7 @@
 #import "ViewController.h"
 #import <objc/runtime.h>
 #import <dlfcn.h>
+#include <sys/sysctl.h>
 
 // 런타임에 자기 자신의 권한을 읽습니다. Security.framework 의 비공개 심벌이라
 // 링크하지 않고 dlsym 으로 찾습니다. 없으면 그 단계만 건너뜁니다.
@@ -47,7 +48,6 @@ typedef NS_ENUM(long long, SDAirDropDiscoverableMode) {
 @interface ViewController ()
 @property (nonatomic, strong) UITextView *logView;
 @property (nonatomic, strong) SFAirDropDiscoveryController *discovery;
-@property (nonatomic, assign) BOOL discoveryAttached;   // 뷰 계층에 붙였는지
 @end
 
 @implementation ViewController
@@ -107,7 +107,7 @@ typedef NS_ENUM(long long, SDAirDropDiscoverableMode) {
         [self.logView.bottomAnchor constraintEqualToAnchor:g.bottomAnchor constant:-30],
     ]];
 
-    [self log:@"v2. 1번부터 순서대로 실행하십시오."];
+    [self log:@"v3. 1번부터 순서대로 실행하십시오."];
 }
 
 - (void)log:(NSString *)fmt, ... {
@@ -202,12 +202,44 @@ typedef NS_ENUM(long long, SDAirDropDiscoverableMode) {
     }
     }
 
+    [self checkSharingDaemon];
+
     [self log:@"샌드박스 쓰기 가능 여부:"];
     [self probeWritable:NSTemporaryDirectory() label:@"tmp"];
     [self probeWritable:NSSearchPathForDirectoriesInDomains(
         NSCachesDirectory, NSUserDomainMask, YES).firstObject label:@"Caches"];
     [self probeWritable:NSSearchPathForDirectoriesInDomains(
         NSDocumentDirectory, NSUserDomainMask, YES).firstObject label:@"Documents"];
+}
+
+// sharingd 가 떠 있는지 확인합니다. 이 데몬이 없으면 setDiscoverableMode:
+// 는 전달될 곳이 없어 아무 일도 일어나지 않습니다. 샌드박스 때문에 목록을
+// 못 읽을 수도 있는데, 그 경우 "확인 불가" 로 표시됩니다.
+- (void)checkSharingDaemon {
+    int mib[3] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL };
+    size_t size = 0;
+    if (sysctl(mib, 3, NULL, &size, NULL, 0) < 0 || size == 0) {
+        [self log:@"sharingd: 확인 불가 (프로세스 목록 접근 불가)"];
+        return;
+    }
+    struct kinfo_proc *procs = malloc(size);
+    if (!procs) { [self log:@"sharingd: 확인 불가 (메모리)"]; return; }
+    if (sysctl(mib, 3, procs, &size, NULL, 0) < 0) {
+        free(procs);
+        [self log:@"sharingd: 확인 불가 (목록 읽기 실패)"];
+        return;
+    }
+    int count = (int)(size / sizeof(struct kinfo_proc));
+    pid_t found = 0;
+    for (int i = 0; i < count; i++) {
+        if (strcmp(procs[i].kp_proc.p_comm, "sharingd") == 0) {
+            found = procs[i].kp_proc.p_pid;
+            break;
+        }
+    }
+    free(procs);
+    if (found) [self log:@"✓ sharingd 실행 중 (pid %d, 전체 %d개 프로세스)", found, count];
+    else       [self log:@"✗ sharingd 가 목록에 없음 (전체 %d개 프로세스)", count];
 }
 
 - (void)probeWritable:(NSString *)dir label:(NSString *)label {
@@ -237,19 +269,19 @@ typedef NS_ENUM(long long, SDAirDropDiscoverableMode) {
     // 1차 시도 — 그대로 설정
     [self trySetEveryone:@"1차(그대로)"];
 
-    // 2차 시도 — 뷰 계층에 붙인 뒤 설정.
-    // SFAirDropDiscoveryController 는 UIViewController 라서 view 가 로드되고
-    // 계층에 있어야 내부 동작이 시작될 수 있습니다.
-    if (!self.discoveryAttached) {
-        self.discoveryAttached = YES;
-        [self addChildViewController:self.discovery];
-        self.discovery.view.frame = CGRectMake(-2000, -2000, 200, 200);
-        self.discovery.view.alpha = 0.0;
-        [self.view addSubview:self.discovery.view];
-        [self.discovery didMoveToParentViewController:self];
-        [self log:@"컨트롤러를 뷰 계층에 부착함 (화면 밖)"];
+    // v2 에서는 여기서 컨트롤러를 뷰 계층에 부착해 봤으나, view 로드 시점에
+    // 앱이 즉시 종료됐습니다. SFAirDropDiscoveryController 의 view 는 건드리지
+    // 않습니다.
+
+    // 2차 시도 — ContactsOnly 를 거쳐 Everyone 으로. 일부 구현은 Off 에서
+    // 곧장 Everyone 으로 가는 전이를 받지 않습니다.
+    @try {
+        [self.discovery setDiscoverableMode:SDAirDropDiscoverableModeContactsOnly];
+        [self log:@"2차 ContactsOnly 설정 후 = %lld", [self.discovery discoverableMode]];
+    } @catch (NSException *e) {
+        [self log:@"✗ 2차 예외: %@", e.reason];
     }
-    [self trySetEveryone:@"2차(부착 후)"];
+    [self trySetEveryone:@"3차(Contacts 경유)"];
 
     // 지연 재확인 — 비동기 반영 가능성
     for (NSNumber *delay in @[ @1.0, @3.0 ]) {
