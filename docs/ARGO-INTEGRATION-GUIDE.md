@@ -1,28 +1,33 @@
 # Argo 통합 가이드 (제미나이 작업 지시서)
 
-이 문서는 `sojubada/AirDrop_tvOS`의 AirDrop 활성화 코드를
-`sojubada/argo`(Spartan 기반 tvOS 파일 브라우저, 앱 이름 **Argo**)에
+이 문서는 `sojubada/AirDrop_tvOS`에서 **실제 기기 검증을 마친** AirDrop 활성화
+방법을 `sojubada/argo`(Spartan 기반 tvOS 파일 브라우저, 앱 이름 **Argo**)에
 통합하기 위한 작업 지시서입니다. 코드 작성자(제미나이)가 이 문서만 읽고
-작업할 수 있도록 필요한 맥락과 API 서명을 모두 담았습니다.
+작업할 수 있도록 필요한 맥락과 API 서명, 그리고 **실패를 통해 알아낸 함정**을
+모두 담았습니다.
 
 ---
 
-## 0. 선행 조건 — 이것이 확인되기 전에는 착수하지 말 것
+## 0. 검증 완료 — 이 문서는 추측이 아니라 실측 결과입니다
 
-AirDrop_tvOS 저장소의 검증 앱(AirDropTV)을 실제 애플TV에서 실행해
-**아래 3가지가 모두 확인된 뒤에** 이 통합을 시작합니다.
+검증 환경: **Apple TV 4K / tvOS 16.6 / TrollStore (탈옥 아님)**
+검증일: 2026-10-20, 검증 앱: AirDropTV v3 (build-9)
 
-| 확인 항목 | 통과 기준 |
+| 항목 | 결과 |
 |---|---|
-| 클래스 생존 | `SFAirDropDiscoveryController`, `SFAirDropReceiverViewController`, `SFAirDropSharingViewControllerTV` 3개가 모두 존재 |
-| 권한 적용 | `setDiscoverableMode:` 호출 후 `discoverableMode`가 `2`(Everyone)로 유지 |
-| 수신 성공 | 아이폰에서 보낸 파일이 `/var/mobile/Downloads/com.apple.AirDrop/<UUID>/Files/` 에 생성 |
+| `Sharing.framework` / `SharingUI.framework` 로드 | ✓ 성공 |
+| `SFAirDropDiscoveryController` | ✓ 존재 |
+| `SFAirDropReceiverViewController` | ✓ 존재 |
+| `SFAirDropSharingViewControllerTV` | ✓ 존재 |
+| 권한 런타임 적용 | ✓ `airdrop.discovery`·`airdrop.settings` 모두 = 1 |
+| `sharingd` 데몬 | ✓ 실행 중 (pid 64) — 별도 데몬을 만들 필요 없음 |
+| discoverable 모드 Everyone 전환 | ✓ 성공 (단, **지연 반영**. 아래 2장 참조) |
+| 파일 송신 | ✓ 성공 |
+| 파일 수신 | ✓ 성공 |
 
-**검증 결과에 따라 작업 범위가 달라집니다.**
-
-- 3개 모두 통과 → 이 문서 전체를 수행
-- 수신만 실패 → **5장(수신)을 건너뛰고** 4장(송신)과 6장(설정 토글)만 수행
-- 클래스 이름이 다름 → 검증 앱이 화면에 출력한 실제 클래스명으로 2장의 선언부를 교체한 뒤 수행
+**결론: 탈옥 없이, TrollStore 권한만으로 송·수신이 모두 됩니다.**
+Breezy가 `sharingd`와 `PineBoard`를 후킹한 작업은 **필요하지 않습니다.**
+이 문서의 전 범위를 그대로 수행하십시오.
 
 ---
 
@@ -47,16 +52,15 @@ spawn.h              프로세스 실행용 헤더
 ```
 
 **중요**: Spartan은 이미 Objective-C 파일과 브리징 헤더를 쓰고 있습니다.
-따라서 AirDrop 코드를 Objective-C로 추가하는 것이 가장 자연스럽습니다.
-비공개 API를 Swift에서 `NSClassFromString` + `perform(_:)`으로 다루면
-가변 인자·블록 전달에서 문제가 생기므로 **Obj-C로 작성하십시오.**
+AirDrop 코드는 **Objective-C로 작성하십시오.** 비공개 API를 Swift에서
+`NSClassFromString` + `perform(_:)`으로 다루면 블록 전달에서 깨집니다.
 
 ---
 
-## 2. 사용할 비공개 API (검증된 서명)
+## 2. 사용할 비공개 API와 반드시 지킬 함정 세 가지
 
 `/System/Library/PrivateFrameworks/Sharing.framework` 에 있습니다.
-아래 선언을 그대로 쓰십시오. 추측하거나 변형하지 마십시오.
+아래 선언을 **그대로** 쓰십시오. 추측하거나 변형하지 마십시오.
 
 ```objc
 typedef NS_ENUM(long long, SDAirDropDiscoverableMode) {
@@ -88,21 +92,60 @@ typedef NS_ENUM(long long, SDAirDropDiscoverableMode) {
 [[NSBundle bundleWithPath:@"/System/Library/PrivateFrameworks/Sharing.framework"] load];
 ```
 
-### 반드시 지킬 안전 규칙
+### 함정 ① — 모드 설정은 비동기입니다 (가장 중요)
 
-1. **모든 클래스는 `NSClassFromString`으로 존재를 확인한 뒤 사용합니다.**
-   nil 클래스에 `alloc`을 보내면 조용히 nil이 되거나 크래시합니다.
+`setDiscoverableMode:` 직후 `discoverableMode`를 읽으면 **항상 0이 나옵니다.**
+약 **1초 뒤**에야 2로 바뀝니다. 실측 로그:
+
+```
+1차(그대로) 즉시 읽기 = 0 (Off)
+2차 ContactsOnly 설정 후 = 0
+3차(Contacts 경유) 즉시 읽기 = 0 (Off)
+   1초 후 모드 = 2 (Everyone)  ← 반영됨
+   3초 후 모드 = 2 (Everyone)  ← 반영됨
+```
+
+검증 1차 시도에서 이것 때문에 "실패"로 오판했습니다.
+**즉시 읽기로 성공·실패를 판정하지 마십시오.** 최소 1.5초 뒤에 확인하거나,
+완료 콜백 방식으로 설계하십시오. UI에 "실패" 표시를 띄우는 로직을 즉시
+읽기에 연결하면 똑같이 오판합니다.
+
+### 함정 ② — `SFAirDropDiscoveryController.view` 를 건드리면 앱이 즉시 죽습니다
+
+이름은 Controller이고 `UIViewController` 상속이지만, **화면에 올릴 수 있는
+물건이 아닙니다.** 아래는 전부 금지입니다.
+
+```objc
+// 전부 크래시합니다 — 절대 하지 마십시오
+[self addChildViewController:discovery];
+[self.view addSubview:discovery.view];
+[self presentViewController:discovery animated:YES completion:nil];
+discovery.view.frame = ...;
+```
+
+객체를 만들어 **프로퍼티로 보관하고 메서드만 호출**하십시오.
+`view`에 접근하는 순간(프레임 설정, addSubview, present 모두 포함) 종료됩니다.
+
+### 함정 ③ — 컨트롤러를 매번 새로 만들지 마십시오
+
+`SFAirDropDiscoveryController` 인스턴스는 **static 또는 싱글턴 프로퍼티로
+한 번만 만들어 보관**합니다. 호출할 때마다 새로 만들면 모드가 유지되지
+않습니다.
+
+### 그 밖의 안전 규칙
+
+1. 모든 클래스는 `NSClassFromString`으로 존재를 확인한 뒤 사용합니다.
+   nil 클래스에 메시지를 보내면 조용히 실패하거나 크래시합니다.
    클래스가 없으면 **AirDrop 관련 UI 자체를 숨기십시오.** 오류 팝업을
    띄우지 말고, 기능이 없는 것처럼 동작해야 합니다.
-2. 비공개 API 호출은 `@try/@catch`로 감쌉니다. Spartan의 `SwiftTryCatch`를
-   재사용하거나 Obj-C 쪽에서 직접 감싸면 됩니다.
+2. 비공개 API 호출은 `@try/@catch`로 감쌉니다.
 3. tvOS 16.6 외의 버전은 고려하지 않습니다. 버전 분기를 만들지 마십시오.
 
 ---
 
 ## 3. 추가할 파일 — `AirDropBridge`
 
-Swift(SwiftUI) 쪽에서 쓸 수 있는 **최소한의 깨끗한 API**만 노출합니다.
+Swift(SwiftUI) 쪽에서 쓸 **최소한의 깨끗한 API**만 노출합니다.
 비공개 API의 복잡함은 이 파일 안에 가둡니다.
 
 **`Spartan/AirDrop/AirDropBridge.h`**
@@ -120,19 +163,26 @@ NS_ASSUME_NONNULL_BEGIN
 /// 현재 discoverable 모드 (0=Off, 1=ContactsOnly, 2=Everyone)
 @property (class, nonatomic, readonly) long long currentMode;
 
-/// 수신 광고를 켭니다. 성공하면 YES.
-+ (BOOL)enableReceiving;
+/// 수신 광고를 켭니다.
+/// 설정이 비동기 반영되므로 반드시 콜백으로 결과를 받습니다.
+/// 내부에서 1.5초 지연 후 모드를 확인해 success 를 판정하십시오.
+/// 즉시 읽기로 판정하면 항상 실패로 나옵니다 (함정 ① 참조).
++ (void)enableReceivingWithCompletion:(nullable void (^)(BOOL success,
+                                                         long long mode))completion;
 
 /// 수신 광고를 끕니다.
 + (void)disableReceiving;
 
 /// 파일을 다른 기기로 보내는 공유 화면을 띄웁니다.
 + (void)presentSenderForFileAtPath:(NSString *)path
-                  fromViewController:(UIViewController *)presenter
-                          completion:(nullable void (^)(NSError * _Nullable))completion;
+                fromViewController:(UIViewController *)presenter
+                        completion:(nullable void (^)(NSError * _Nullable))completion;
 
 /// 수신 대기 화면 컨트롤러를 만들어 돌려줍니다. 사용할 수 없으면 nil.
 + (nullable UIViewController *)makeReceiverViewController;
+
+/// 표시된 수신 화면에서 광고를 시작합니다. present 완료 후에 호출할 것.
++ (void)startAdvertisingOn:(UIViewController *)receiverViewController;
 
 /// AirDrop 수신 파일이 쌓이는 경로
 @property (class, nonatomic, readonly) NSString *inboxPath;
@@ -142,41 +192,33 @@ NS_ASSUME_NONNULL_BEGIN
 NS_ASSUME_NONNULL_END
 ```
 
-**`Spartan/AirDrop/AirDropBridge.m`** 구현 요점
+구현 요점
 
 - `isAvailable`: 프레임워크 로드 후 3개 클래스 모두 `NSClassFromString` 통과
-- `SFAirDropDiscoveryController` 인스턴스는 **static 변수로 보관**합니다.
-  매번 새로 만들면 모드가 유지되지 않을 수 있습니다.
-- `enableReceiving`: 모드를 Everyone으로 설정한 뒤 **다시 읽어서 2인지 확인**해
-  그 결과를 반환합니다. 설정만 하고 성공으로 간주하지 마십시오.
+- `SFAirDropDiscoveryController` 인스턴스는 static 으로 한 번만 생성 (함정 ③)
+- 그 인스턴스의 `view`에는 절대 접근하지 않음 (함정 ②)
 - `inboxPath`: `/var/mobile/Downloads/com.apple.AirDrop`
-- `makeReceiverViewController`: `SFAirDropReceiverViewController`를 만들고,
-  **표시된 뒤에** `startAdvertising`을 호출해야 합니다. 생성 직후 호출하면
-  효과가 없을 수 있으므로, 호출 책임은 5장의 SwiftUI 래퍼에 둡니다.
 
 브리징 헤더(Spartan의 기존 `*-Bridging-Header.h`)에 `AirDropBridge.h`를
-추가해 Swift에서 보이게 하십시오. 기존 브리징 헤더 내용을 지우지 말고
-한 줄만 추가합니다.
+**한 줄 추가**하십시오. 기존 내용을 지우지 마십시오.
 
 ---
 
 ## 4. 송신 — 기존 파일 메뉴에 항목 추가
 
-Spartan에는 파일을 길게 눌렀을 때 나오는 메뉴(정보 보기, 이름 변경, 이동,
-복사, 휴지통 등)가 이미 있습니다. **그 메뉴에 한 항목을 추가**합니다.
+Spartan에는 파일 길게 누르기 메뉴(정보 보기, 이름 변경, 이동, 복사, 휴지통)가
+이미 있습니다. **그 메뉴에 한 항목을 추가**합니다.
 
 - 항목 이름: `AirDrop으로 보내기`
 - 표시 조건: `AirDropBridge.isAvailable == true` **그리고** 대상이 디렉터리가 아닐 때
 - 동작: `presentSenderForFileAtPath:fromViewController:completion:` 호출
 
-SwiftUI에서 `UIViewController`를 present해야 하므로, 현재 화면의
-`UIViewController`를 얻는 헬퍼가 필요합니다. Spartan에 이미 그런 헬퍼가
-있으면 재사용하고, 없으면 `UIApplication.shared.connectedScenes`에서
-keyWindow의 `rootViewController`를 찾아 쓰십시오.
+SwiftUI에서 현재 화면의 `UIViewController`를 얻는 헬퍼가 필요합니다.
+Spartan에 이미 있으면 재사용하고, 없으면 `UIApplication.shared.connectedScenes`
+에서 keyWindow의 `rootViewController`를 찾아 쓰십시오.
 
 **디렉터리 송신은 구현하지 마십시오.** 폴더 AirDrop은 tvOS에서 동작이
-불확실하고, 필요하면 사용자가 Spartan의 zip 압축 기능으로 묶은 뒤 보내면
-됩니다.
+불확실합니다. 필요하면 사용자가 Spartan의 zip 압축으로 묶어 보내면 됩니다.
 
 ---
 
@@ -184,8 +226,9 @@ keyWindow의 `rootViewController`를 찾아 쓰십시오.
 
 ### 5-1. 수신 화면
 
-`SFAirDropReceiverViewController`를 `UIViewControllerRepresentable`로 감싸
-SwiftUI 화면으로 만듭니다.
+`SFAirDropReceiverViewController`를 `UIViewControllerRepresentable`로 감쌉니다.
+**이 컨트롤러는 present 해도 됩니다.** 함정 ②는 DiscoveryController에만
+해당합니다.
 
 ```swift
 struct AirDropReceiveView: UIViewControllerRepresentable {
@@ -196,29 +239,29 @@ struct AirDropReceiveView: UIViewControllerRepresentable {
 }
 ```
 
-표시된 직후 `startAdvertising`을 호출해야 합니다.
-`makeUIViewController` 안이 아니라 `onAppear` 시점에 호출하도록
-브리지에 `+ (void)startAdvertisingOn:(UIViewController *)vc` 같은 메서드를
-하나 더 두는 방식이 안전합니다.
+`startAdvertising`은 **화면이 표시된 뒤에** 호출해야 합니다.
+`makeUIViewController` 안이 아니라 표시 완료 시점에
+`AirDropBridge.startAdvertisingOn(_:)`을 부르십시오.
+
+화면이 떠 있는 동안 사용자가 떠나지 않도록, 안내 문구를 함께 표시하십시오.
 
 ### 5-2. 받은 파일 보여주기
 
-수신 화면이 떠 있는 동안 `AirDropBridge.inboxPath`를 **2초 간격으로
-폴링**해 새 파일을 목록에 표시합니다. 파일시스템 알림(FSEvents, DispatchSource)
-대신 폴링을 쓰는 이유는, 샌드박스 환경에서 알림이 오지 않는 경우가 있어
-단순한 폴링이 더 확실하기 때문입니다.
+수신 화면이 떠 있는 동안 `AirDropBridge.inboxPath`를 **2초 간격으로 폴링**해
+새 파일을 목록에 표시합니다. 파일시스템 알림 대신 폴링을 쓰는 이유는,
+샌드박스 환경에서 알림이 오지 않는 경우가 있어 폴링이 더 확실하기 때문입니다.
 
 - 실제 파일은 `<inboxPath>/<UUID>/Files/` 아래에 있습니다.
-  UUID 디렉터리를 한 단계 더 들어가야 합니다.
-- 새 파일이 보이면 목록에 추가하고, 탭하면 Spartan의 기존 파일 상세 화면을
-  재사용해 엽니다. 새 뷰어를 만들지 마십시오.
+  **UUID 디렉터리를 한 단계 더 들어가야 합니다.**
+- 새 파일을 탭하면 Spartan의 기존 파일 상세 화면을 재사용해 엽니다.
+  새 뷰어를 만들지 마십시오.
 
 ### 5-3. 즐겨찾기 등록
 
 Spartan에는 즐겨찾기 기능이 이미 있습니다. 첫 실행 시
-`/var/mobile/Downloads/com.apple.AirDrop` 를 **`AirDrop 수신함`이라는
-이름으로 즐겨찾기에 자동 추가**하십시오. 이것만으로도 수신 파일 접근이
-대부분 해결됩니다. 이미 등록돼 있으면 중복 추가하지 마십시오.
+`/var/mobile/Downloads/com.apple.AirDrop` 를 **`AirDrop 수신함`이라는 이름으로
+즐겨찾기에 자동 추가**하십시오. 이것만으로도 수신 파일 접근이 대부분
+해결됩니다. 이미 등록돼 있으면 중복 추가하지 마십시오.
 
 ---
 
@@ -226,53 +269,64 @@ Spartan에는 즐겨찾기 기능이 이미 있습니다. 첫 실행 시
 
 Argo 설정 화면에 섹션 하나를 추가합니다.
 
-- `AirDrop 수신` 토글 — 켜면 `enableReceiving`, 끄면 `disableReceiving`
-- 토글 아래에 현재 상태를 **읽어서** 표시: `currentMode`를 그대로 보여줍니다
+- `AirDrop 수신` 토글 — 켜면 `enableReceivingWithCompletion:`,
+  끄면 `disableReceiving`
+- 토글을 켠 직후에는 **스피너를 보여주고 콜백을 기다리십시오.**
+  비동기이므로 즉시 결과를 표시하면 틀립니다 (함정 ①).
+- 토글 아래에 현재 상태를 **읽어서** 표시: `currentMode` 값을 그대로
 - `AirDropBridge.isAvailable == false` 면 이 섹션 전체를 숨깁니다
 
 ### 반드시 처리할 것 — 모드가 유지되지 않는 문제
 
-`setDiscoverableMode:`는 디스크 설정을 바꾸는 것이 아니라 실행 중인
-`sharingd` 데몬의 상태를 바꿉니다. 따라서
+`setDiscoverableMode:`는 디스크 설정이 아니라 실행 중인 `sharingd` 데몬의
+상태를 바꿉니다. 따라서
 
 - **재부팅하면 Off로 돌아갑니다.**
 - 앱이 백그라운드로 갔다 오면 꺼져 있을 수 있습니다.
 - iOS 16.2부터 Everyone 모드가 일정 시간 후 자동으로 꺼지는 제한이
   생겼습니다. tvOS 16.6에도 같은 제한이 있을 가능성이 있습니다.
 
-그래서 UI는 **저장된 토글 값을 믿지 말고 항상 실제 모드를 읽어** 표시해야
-합니다. 그리고 앱이 포그라운드로 돌아올 때(`scenePhase == .active`)
-토글이 켜져 있으면 `enableReceiving`을 **다시 호출**하십시오.
+그래서 UI는 **저장된 토글 값을 믿지 말고 항상 실제 모드를 읽어** 표시하고,
+앱이 포그라운드로 돌아올 때(`scenePhase == .active`) 토글이 켜져 있으면
+`enableReceivingWithCompletion:`을 **다시 호출**하십시오.
 
 ---
 
-## 7. 권한 파일 병합
+## 7. 권한 파일 병합 — 검증된 5개 키
 
-Argo의 기존 `entitlements.plist`에 **아래 두 키를 추가**합니다.
+Argo의 기존 `entitlements.plist`에 **아래 키들을 추가**합니다.
 기존 키(루트 헬퍼·파일시스템 접근용)를 **지우거나 바꾸지 마십시오.**
+이미 들어 있는 키는 중복 추가하지 말고 그대로 두십시오.
 
 ```xml
 <key>com.apple.private.airdrop.discovery</key>
 <true/>
 <key>com.apple.private.airdrop.settings</key>
 <true/>
+<key>com.apple.private.security.no-sandbox</key>
+<true/>
+<key>platform-application</key>
+<true/>
+<key>com.apple.private.security.storage.AppDataContainers</key>
+<true/>
 ```
 
-### 알아둘 위험
+검증에서 확인된 사실:
 
-TrollStore 문서에 따르면 `platform-application` 권한은 샌드박스의 일부가
-오히려 더 조여지는 부작용이 있고, 그것을 풀려면 추가 비공개 권한이
-필요합니다. Argo는 파일시스템 접근을 위해 `no-sandbox` 계열 권한을 쓰고
-있을 가능성이 높습니다.
+- 앞의 두 키만으로는 **Documents 디렉터리 쓰기가 막혔습니다.**
+  `storage.AppDataContainers`를 넣자 쓰기가 가능해졌습니다.
+  `platform-application`을 쓸 때는 이 키가 사실상 필수입니다.
+- `application-identifier`는 없는 상태로도 정상 동작했습니다.
+  **추가하지 마십시오.** 값 형식을 잘못 넣으면 앱이 실행되지 않을 수 있습니다.
+- TrollStore 금지 목록(`com.apple.private.cs.debugger`, `dynamic-codesigning`,
+  `com.apple.private.skip-library-validation`)에는 위 키가 하나도 없습니다.
 
-따라서 **단독 앱에서 되던 AirDrop이 Argo에서는 안 될 수 있습니다.**
-통합 후 AirDrop이 동작하지 않으면 가장 먼저 이 조합을 의심하십시오.
-이때 권한을 추측으로 더 넣지 말고, 어떤 권한 조합에서 실패하는지
-기록해 보고하십시오.
+Argo가 이미 `no-sandbox`나 `platform-application`을 쓰고 있다면 그대로 두고
+나머지만 추가하면 됩니다.
 
 ---
 
-## 8. IPA 설치 연계 (선택 — 검증 필요)
+## 8. IPA 설치 연계 (선택 — 아직 검증되지 않음)
 
 Argo의 목표 중 하나가 "IPA를 골라 애플TV에 설치"입니다.
 AirDrop으로 받은 IPA를 그 자리에서 설치하면 흐름이 완결됩니다.
@@ -283,50 +337,55 @@ TrollStore는 URL 스킴으로 설치를 받습니다.
 apple-magnifier://install?url=<IPA_의_URL>
 ```
 
-문제는 이것이 **http(s) URL을 기대**한다는 점입니다. 로컬 파일 경로를
-그대로 넘기는 것은 동작이 확인되지 않았습니다. 우회 방법은 Argo 안에
-작은 로컬 HTTP 서버를 띄워 해당 IPA만 서빙하고,
-`http://127.0.0.1:<포트>/파일.ipa` 를 넘기는 것입니다.
+문제는 이것이 **http(s) URL을 기대**한다는 점입니다. 로컬 파일 경로를 그대로
+넘기는 것은 동작이 확인되지 않았습니다. 우회 방법은 Argo 안에 작은 로컬
+HTTP 서버를 띄워 해당 IPA만 서빙하고 `http://127.0.0.1:<포트>/파일.ipa`를
+넘기는 것입니다.
 
-**이 방식은 아직 검증되지 않았습니다.** WebDAV 작업으로 HTTP 코드가
-이미 들어온 뒤에 시도하는 것이 효율적이므로, **8장은 5·6장이 끝난 뒤
-별도 작업으로 미루십시오.** 지금 구현하지 마십시오.
+**아직 검증되지 않았습니다.** WebDAV 작업으로 HTTP 코드가 들어온 뒤에
+시도하는 것이 효율적이므로, **8장은 5·6장이 끝난 뒤 별도 작업으로
+미루십시오. 지금 구현하지 마십시오.**
 
 ---
 
 ## 9. 하지 말아야 할 것
 
+- **`SFAirDropDiscoveryController`의 `view`에 접근하지 마십시오.** (함정 ②)
+- **즉시 읽기로 모드 설정 성공·실패를 판정하지 마십시오.** (함정 ①)
 - 검증용 버튼(프레임워크 로드, 클래스 존재 확인)을 Argo UI에 넣지 마십시오.
   내부 가드로만 씁니다.
-- `sharingd`나 `PineBoard`를 후킹하려 하지 마십시오. 탈옥 환경이 아니므로
-  불가능합니다.
+- `sharingd`나 `PineBoard`를 후킹하려 하지 마십시오. 필요 없고, 탈옥이 아닌
+  환경에서는 불가능합니다. `sharingd`는 이미 떠 있습니다.
+- 별도 상주 데몬을 만들지 마십시오. Breezy의 `breezyd`는 탈옥 환경 전용이며,
+  여기서는 앱 안에서 전부 해결됩니다.
 - Spartan의 기존 파일 조작·루트 헬퍼 코드를 수정하지 마십시오.
   AirDrop 기능은 **추가만** 합니다.
+- `application-identifier` 권한을 추가하지 마십시오.
+- 새 서드파티 의존성을 추가하지 마십시오. 전부 시스템 프레임워크로 됩니다.
 - GitHub Actions 워크플로를 임의로 수정하지 마십시오.
   (참고: AirDrop_tvOS에서 XcodeGen이 Xcode 16.3 포맷으로 프로젝트를 만들어
-  러너의 Xcode 15가 열지 못하는 문제가 있었습니다. Argo에서 같은 증상이
-  나면 `project.yml`의 `options`에 `projectFormat: xcode15_0`을 넣으면
-  됩니다. 그 외에는 손대지 마십시오.)
-- 새 서드파티 의존성을 추가하지 마십시오. 전부 시스템 프레임워크로 됩니다.
+  러너의 Xcode 15가 열지 못하는 문제가 있었습니다. Argo에서 같은 증상이 나면
+  `project.yml`의 `options`에 `projectFormat: xcode15_0`을 넣으면 됩니다.
+  그 외에는 손대지 마십시오.)
 
 ---
 
 ## 10. 완료 기준
 
-다음이 모두 충족되면 작업 완료입니다.
-
 1. AirDrop을 쓸 수 없는 기기에서 Argo가 **아무 변화 없이** 정상 동작한다
    (관련 UI가 숨겨지고 크래시하지 않는다)
-2. 설정에서 수신을 켜면 아이폰 공유 시트에 애플TV가 나타난다
+2. 설정에서 수신을 켜면 **1~2초 뒤** 상태가 Everyone으로 바뀌고,
+   아이폰 공유 시트에 애플TV가 나타난다
 3. 토글 상태가 실제 모드를 반영하고, 앱을 다시 열면 재적용된다
 4. 파일 메뉴의 `AirDrop으로 보내기`로 파일을 아이폰에 보낼 수 있다
 5. 수신한 파일이 수신 화면 목록과 즐겨찾기 양쪽에서 보인다
-6. GitHub Actions 빌드가 통과하고 `.tipa`가 릴리스에 첨부된다
+6. 기존 Spartan 기능(파일 조작, 루트 접근)이 그대로 동작한다
+7. GitHub Actions 빌드가 통과하고 `.tipa`가 릴리스에 첨부된다
 
 ## 11. 참고 자료
 
-- 검증 앱 소스: 이 저장소의 `ViewController.m` — 비공개 API 호출 방식의
-  동작하는 예제입니다. 선언부와 호출 순서를 그대로 참고하십시오.
-- 권한 파일: 이 저장소의 `entitlements.plist`
-- `lechium/Breezy` — tvOS AirDrop 연구 원본 (탈옥 전제이므로 수신 핸들러
-  부분은 적용 불가, API 서명 참고용)
+- **검증 앱 소스: 이 저장소의 `ViewController.m` (v3)** — 동작이 확인된
+  구현입니다. 선언부와 호출 순서를 그대로 참고하십시오.
+- 권한 파일: 이 저장소의 `entitlements.plist` — 검증된 5개 키
+- `lechium/Breezy` — tvOS AirDrop 연구 원본. 탈옥 전제이므로 데몬·후킹
+  부분은 **적용하지 마십시오.** API 서명 참고용으로만 보십시오.

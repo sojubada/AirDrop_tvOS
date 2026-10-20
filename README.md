@@ -1,5 +1,16 @@
 # AirDropTV
 
+> **검증 완료 (2026-10-20, Apple TV 4K / tvOS 16.6 / TrollStore)**
+> 탈옥 없이 AirDrop **송신·수신이 모두 동작**함을 실제 기기에서 확인했습니다.
+> 핵심 발견 두 가지:
+> 1. `setDiscoverableMode:` 는 **비동기**입니다. 즉시 읽으면 항상 0이고
+>    약 1초 뒤에 2(Everyone)가 됩니다. 즉시 읽기로 판정하면 오판합니다.
+> 2. `SFAirDropDiscoveryController` 의 `view` 에 접근하면 **앱이 즉시 종료**됩니다.
+>    객체만 보관하고 메서드만 호출해야 합니다.
+>
+> 자세한 내용과 Argo 통합 방법은
+> [`docs/ARGO-INTEGRATION-GUIDE.md`](docs/ARGO-INTEGRATION-GUIDE.md) 에 있습니다.
+
 tvOS 16.6 애플TV에서 AirDrop을 활성화할 수 있는지 검증하는 최소 앱입니다.
 맥에 Xcode 없이 **GitHub Actions**에서 빌드하고, TrollStore로 설치합니다.
 
@@ -42,9 +53,11 @@ Actions 탭 → Build AirDropTV → Run workflow.
 |---|---|---|
 | 1 | Sharing / SharingUI.framework 로드 | 경로·로드 성공 여부 |
 | 2 | AirDrop 클래스 3종 존재 확인 | ✗ 면 런타임에서 후보 이름을 나열 |
-| 3 | discoverable 모드를 Everyone 으로 | `모드 = 2` 면 권한 적용 성공 |
-| 4 | 수신 대기 화면 + startAdvertising | 이 화면을 유지한 채 전송 |
-| 5 | 테스트 파일 송신 | 아이폰이 목록에 뜨는지 |
+| 3 | 런타임 권한·`sharingd`·샌드박스 확인 | 권한 2개가 `= 1`, sharingd 실행 중 |
+| 4 | discoverable 모드를 Everyone 으로 | **1초·3초 후** 값이 2면 성공 |
+| 5 | 모드 다시 읽기 | 현재 값 확인 |
+| 6 | 수신 대기 화면 + startAdvertising | 이 화면을 유지한 채 전송 |
+| 7 | 파일 송신 | 아이폰이 목록에 뜨는지 |
 | 0 | AirDrop 끄기 | 정리용 |
 
 4번 수행 후, 같은 Apple ID의 아이폰에서 파일을 전송하고
