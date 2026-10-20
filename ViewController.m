@@ -252,7 +252,7 @@ typedef NS_ENUM(long long, SDAirDropDiscoverableMode) {
     [self trySetEveryone:@"2차(부착 후)"];
 
     // 지연 재확인 — 비동기 반영 가능성
-    for (double delay in @[ @1.0, @3.0 ]) {
+    for (NSNumber *delay in @[ @1.0, @3.0 ]) {
         double d = [delay doubleValue];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(d * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
